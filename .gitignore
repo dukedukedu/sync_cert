@@ -1,0 +1,25 @@
+# Ignore actual config file containing secrets
+sync_cert.conf
+
+# Logs and error output
+*.log
+*.err
+/var/log/sync_cert/
+/tmp/sync_cert/
+/sync_cert.log
+/sync_cert.err
+
+# Backup or rotated files
+*.crt.*
+*.key.*
+*.ca-bundle.*
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Optional: editor swap/temp files
+*.swp
+*~
+
+.vscode/
