@@ -14,6 +14,7 @@ IFS=$'\n\t'
 # SECRET_NAME="your/aws/secretsmanager/ssl-cert"
 # EMAIL="noreply@example.com"
 # ADMIN_EMAIL="admin@example.com"
+# REQUIRED_IAM_ROLE="IAM_Role_Name"
 # =====================
 
 # Load optional config
@@ -37,6 +38,30 @@ JQ_CMD=$(which jq)
 REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | jq -r '.region')
 REGION=${REGION:-us-east-1}
 REGION=${AWS_REGION:-$REGION}
+
+# IAM ROLE CHECK
+REQUIRED_IAM_ROLE="${REQUIRED_IAM_ROLE:-IAM_Role_Name}"
+
+IAM_ROLE_ARN=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/iam/info | jq -r .InstanceProfileArn || echo "")
+IAM_ROLE_NAME=$(basename "$IAM_ROLE_ARN")
+
+if [[ "$REQUIRED_IAM_ROLE" == "IAM_Role_Name" ]]; then
+  log "[INFO] REQUIRED_IAM_ROLE is set to default or not configured — skipping IAM role validation."
+else
+  if [[ -z "$IAM_ROLE_NAME" ]]; then
+    log_error "No IAM role attached or metadata is inaccessible."
+    notify_admin "IAM role check failed on $HOSTNAME_FQDN.\n\nNo IAM role found or metadata access failed." "IAM Role Missing"
+    exit 1
+  fi
+
+  if [[ "$IAM_ROLE_NAME" != "$REQUIRED_IAM_ROLE" ]]; then
+    log_error "IAM role mismatch: expected '$REQUIRED_IAM_ROLE', found '$IAM_ROLE_NAME'"
+    notify_admin "IAM role mismatch on $HOSTNAME_FQDN.\n\nExpected: $REQUIRED_IAM_ROLE\nFound: $IAM_ROLE_NAME" "IAM Role Mismatch"
+    exit 1
+  fi
+
+  log "IAM role verified: [$IAM_ROLE_NAME]"
+fi
 
 # HOSTNAME
 HOSTNAME_FQDN=$(hostname -f 2>/dev/null)
