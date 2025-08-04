@@ -19,13 +19,15 @@ sudo ./sync_cert.sh
 
 # sync_cert.sh – SSL Certificate Sync & Auto-Renew Script
 
-This script automates the retrieval, validation, installation, and management of a wildcard SSL certificate (`*.everleagues.com`) from AWS Secrets Manager. It is designed to be run via cron on Debian-based systems, integrates safely with nginx, and notifies administrators of important events.
+This script automates the retrieval, validation, installation, and management of a wildcard SSL certificate (`*.everleagues.com`) from cloud secret managers. It is designed to be run via cron on Debian-based systems, integrates safely with nginx, and notifies administrators of important events.
 
 ---
 
 ## 📦 Features
 
-- Fetches base64-encoded cert, key, and bundles from AWS Secrets Manager
+- Fetches base64-encoded cert, key, and bundles from:
+  - ✅ AWS Secrets Manager (default/original)
+  - 🆕 Azure Key Vault (**multi-cloud-sync branch only**)
 - Validates Common Name (CN) and Subject Alternative Names (SANs)
 - Checks certificate expiration and warns if ≤15 days left
 - Logs fingerprint, issuer, and expiration date
@@ -39,26 +41,30 @@ This script automates the retrieval, validation, installation, and management of
 
 ## 🛠️ What the Script Does
 
-1. Fetches SSL certificate from AWS Secrets Manager
-2. Decodes the base64 values into:
-   - `everleagues.com.crt`
-   - `everleagues.com.key`
-   - `everleagues.com.ca-bundle`
+1. Detects the cloud platform (`aws`, `azure`, or `unknown`)
+2. Fetches SSL certificate from the appropriate secret source:
+   - AWS Secrets Manager (`aws`)
+   - Azure Key Vault (`azure`) 🆕
+3. Decodes base64 values into:
+   - `yourdomain.com.crt`
+   - `yourdomain.com.key`
+   - `yourdomain.com.ca-bundle`
    - `ssl-bundle.crt`
-3. Validates CN and SAN values
-4. Logs:
+4. Validates CN and SAN values
+5. Logs:
    - SHA-256 fingerprint
    - Certificate issuer
    - Expiration date and days remaining
-5. Sends email alerts if:
+6. Sends email alerts if:
    - Certificate expired
    - Expiration ≤ 15 days
    - CN/SAN mismatch
    - First-time install (no certs found)
    - Nginx reload fails or config test fails
-6. Installs new certs if changed and reloads nginx
-7. Backs up previous cert files in `/etc/ssl/everleagues.com/`
-8. Cleans up temporary files in `/tmp/sync_cert`
+   - 🆕 Cloud platform is unrecognized
+7. Installs new certs if changed and reloads nginx
+8. Backs up previous cert files in `/etc/ssl/yourdomain.com/`
+9. Cleans up temporary files in `/tmp/sync_cert`
 
 ---
 
@@ -66,7 +72,9 @@ This script automates the retrieval, validation, installation, and management of
 
 | Case                               | Behavior                                                   |
 |------------------------------------|-------------------------------------------------------------|
+| Cloud platform not detected 🆕     | Logs error, notifies admin, exits                          |
 | AWS Secret fetch fails             | Logs error, notifies admin, exits                           |
+| Azure secret fetch fails 🆕        | Logs error, notifies admin, exits                           |
 | Base64 decoding fails              | Logs error, notifies admin, exits                           |
 | CN or SAN mismatch                 | Logs error, notifies admin, exits                           |
 | Certificate already expired        | Logs error, notifies admin, exits                           |
@@ -81,13 +89,21 @@ This script automates the retrieval, validation, installation, and management of
 
 ## 🔧 Configuration
 
-### `/etc/sync_cert.conf` (optional)
-Provide domain name, AWS secret name, recipient email(s), and admin email.
-domain name and AWS secret name are MUST
+### `/etc/sync_cert.conf`
+
+The script reads configuration from this file. It must contain the domain name and secret identifier for your cloud provider. Optional fields support email alerts and IAM role enforcement (for AWS).
 
 ```bash
-# Example config
+# Required
 DOMAIN_NAME="yourdomain.com"
+
+# If using AWS (default)
 SECRET_NAME="your/aws/secretsmanager/ssl-cert"
+REQUIRED_IAM_ROLE="IAM_Role_Name"
+
+# If using Azure (multi-cloud-sync branch)
+AZURE_KEY_VAULT_NAME="your-key-vault-name"
+
+# Email alerts
 EMAIL="noreply@example.com"
 ADMIN_EMAIL="admin@example.com"
