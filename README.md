@@ -19,7 +19,7 @@ sudo ./sync_cert.sh
 
 # sync_cert.sh – SSL Certificate Sync & Auto-Renew Script
 
-This script automates the retrieval, validation, installation, and management of a wildcard SSL certificate (`*.everleagues.com`) from AWS Secrets Manager. It is designed to be run via cron on Debian-based systems, integrates safely with nginx, and notifies administrators of important events.
+This script automates the retrieval, validation, installation, and management of a wildcard SSL certificate (`*.yourdomain.com`) from AWS Secrets Manager. It is designed to be run via cron on Debian-based systems, integrates safely with nginx, and notifies administrators of important events.
 
 ---
 
@@ -41,9 +41,9 @@ This script automates the retrieval, validation, installation, and management of
 
 1. Fetches SSL certificate from AWS Secrets Manager
 2. Decodes the base64 values into:
-   - `everleagues.com.crt`
-   - `everleagues.com.key`
-   - `everleagues.com.ca-bundle`
+   - `yourdomain.com.crt`
+   - `yourdomain.com.key`
+   - `yourdomain.com.ca-bundle`
    - `ssl-bundle.crt`
 3. Validates CN and SAN values
 4. Logs:
@@ -57,7 +57,7 @@ This script automates the retrieval, validation, installation, and management of
    - First-time install (no certs found)
    - Nginx reload fails or config test fails
 6. Installs new certs if changed and reloads nginx
-7. Backs up previous cert files in `/etc/ssl/everleagues.com/`
+7. Backs up previous cert files in `/etc/ssl/yourdomain.com/`
 8. Cleans up temporary files in `/tmp/sync_cert`
 
 ---
