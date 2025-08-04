@@ -1,5 +1,19 @@
+# sync_cert.conf.example
+
+# Domain this certificate is for
 DOMAIN_NAME="yourdomain.com"
+
+# AWS Secrets Manager secret name
 SECRET_NAME="your/aws/secretsmanager/ssl-cert"
+
+# Azure Key Vault name
+AZURE_KEY_VAULT_NAME="your-key-vault-name"
+
+# Email address used in the 'From' field
 EMAIL="noreply@example.com"
+
+# Admin email to receive alerts
 ADMIN_EMAIL="admin@example.com"
+
+# Required IAM Role (for AWS verification)
 REQUIRED_IAM_ROLE="IAM_Role_Name"

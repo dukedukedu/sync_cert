@@ -15,12 +15,27 @@ IFS=$'\n\t'
 # EMAIL="noreply@example.com"
 # ADMIN_EMAIL="admin@example.com"
 # REQUIRED_IAM_ROLE="IAM_Role_Name"
+# AZURE_KEY_VAULT_NAME="your-key-vault-name"
 # =====================
 
-# Load optional config
-[ -f /etc/sync_cert.conf ] && source /etc/sync_cert.conf
 
-# CONFIGURATION (fallbacks if config not loaded)
+# Load config
+CONFIG_FILE="/etc/sync_cert.conf"
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+
+# Detect platform
+detect_platform() {
+  if curl -s --connect-timeout 1 http://169.254.169.254/latest/meta-data/ >/dev/null; then
+    echo "aws"
+  elif curl -s -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -o /dev/null; then
+    echo "azure"
+  else
+    echo "unknown"
+  fi
+}
+PLATFORM=$(detect_platform)
+
+# Defaults
 SECRET_NAME="${SECRET_NAME:-your/aws/secret/name}"
 CERT_DIR="/etc/ssl/${DOMAIN_NAME:-yourdomain.com}"
 TMP_DIR="/tmp/sync_cert"
@@ -30,51 +45,15 @@ ERR_FILE="$LOG_DIR/sync_cert.err"
 ARCHIVE_DIR="$LOG_DIR/archive"
 EMAIL="${EMAIL:-}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+AZURE_KEY_VAULT_NAME="${AZURE_KEY_VAULT_NAME:-}"
 
-AWS_CMD=$(which aws)
-JQ_CMD=$(which jq)
+AWS_CMD=$(command -v aws || true)
+AZ_CMD=$(command -v az || true)
+JQ_CMD=$(command -v jq || true)
 
-# REGION DETECTION
-REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | jq -r '.region')
-REGION=${REGION:-us-east-1}
-REGION=${AWS_REGION:-$REGION}
-
-# IAM ROLE CHECK
-REQUIRED_IAM_ROLE="${REQUIRED_IAM_ROLE:-IAM_Role_Name}"
-
-IAM_ROLE_ARN=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/iam/info | jq -r .InstanceProfileArn || echo "")
-IAM_ROLE_NAME=$(basename "$IAM_ROLE_ARN")
-
-if [[ "$REQUIRED_IAM_ROLE" == "IAM_Role_Name" ]]; then
-  log "[INFO] REQUIRED_IAM_ROLE is set to default or not configured — skipping IAM role validation."
-else
-  if [[ -z "$IAM_ROLE_NAME" ]]; then
-    log_error "No IAM role attached or metadata is inaccessible."
-    notify_admin "IAM role check failed on $HOSTNAME_FQDN.\n\nNo IAM role found or metadata access failed." "IAM Role Missing"
-    exit 1
-  fi
-
-  if [[ "$IAM_ROLE_NAME" != "$REQUIRED_IAM_ROLE" ]]; then
-    log_error "IAM role mismatch: expected '$REQUIRED_IAM_ROLE', found '$IAM_ROLE_NAME'"
-    notify_admin "IAM role mismatch on $HOSTNAME_FQDN.\n\nExpected: $REQUIRED_IAM_ROLE\nFound: $IAM_ROLE_NAME" "IAM Role Mismatch"
-    exit 1
-  fi
-
-  log "IAM role verified: [$IAM_ROLE_NAME]"
-fi
-
-# HOSTNAME
-HOSTNAME_FQDN=$(hostname -f 2>/dev/null)
-if [[ -z "$HOSTNAME_FQDN" || "$HOSTNAME_FQDN" == "(none)" ]]; then
-  HOSTNAME_FQDN=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
-fi
-HOSTNAME_FQDN=${HOSTNAME_FQDN:-unknown-host}
-
-# SETUP
 mkdir -p "$LOG_DIR" "$CERT_DIR" "$TMP_DIR" "$ARCHIVE_DIR"
 chown root:adm "$ARCHIVE_DIR"
 
-# LOGGING
 log() {
   local msg="[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $1"
   echo "$msg" | tee -a "$LOG_FILE"
@@ -90,57 +69,65 @@ notify_admin() {
   local message="$1"
   local subject="$2"
 
-  if [[ -z "${EMAIL:-}" || -z "${ADMIN_EMAIL:-}" ]]; then
-    log "[INFO] Skipping email notification because EMAIL or ADMIN_EMAIL is not set."
+  if [[ -z "$EMAIL" || -z "$ADMIN_EMAIL" ]]; then
+    log "[INFO] Skipping email (missing EMAIL or ADMIN_EMAIL)."
     return 0
   fi
+  if [[ "$EMAIL" == "noreply@example.com" || "$ADMIN_EMAIL" == "admin@example.com" ]]; then
+    log "[INFO] Skipping email (EMAIL or ADMIN_EMAIL still default values)."
+    return 0
+  fi
+  if ! command -v mail >/dev/null 2>&1; then
+    log_error "'mail' command not available. Cannot send email."
+    return 1
+  fi
 
-  echo -e "Host: $HOSTNAME_FQDN\n\n$message" | mail -s "[$HOSTNAME_FQDN] $subject" \
+  echo -e "Host: $(hostname -f)\n\n$message" | mail -s "[$(hostname -f)] $subject" \
     -a "From: SSL Certificate Update <$EMAIL>" \
     -a "X-Priority: 1 (Highest)" \
     -a "Importance: High" \
     "$ADMIN_EMAIL"
+  log "[INFO] Sent notification: $subject"
 }
 
+HOSTNAME_FQDN=$(hostname -f 2>/dev/null)
+[[ -z "$HOSTNAME_FQDN" || "$HOSTNAME_FQDN" == "(none)" ]] && \
+  HOSTNAME_FQDN=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+HOSTNAME_FQDN=${HOSTNAME_FQDN:-unknown-host}
 
-validate_cn() {
-  local cert_file="$1"
-  local expected_cn="*.${DOMAIN_NAME}"
-  local cert_cn
-  cert_cn=$(openssl x509 -noout -subject -in "$cert_file" | sed -n 's/^.*CN[[:space:]]*=[[:space:]]*\([^,\/]*\).*$/\1/p')
-
-  if [[ "$cert_cn" != "$expected_cn" ]]; then
-    log_error "CN mismatch: expected '$expected_cn', got [$cert_cn]"
-    notify_admin "Certificate CN mismatch. Expected: $expected_cn, Got: [$cert_cn]" "SSL Certificate CN Mismatch"
-    return 1
-  fi
-  log "CN verified: [$cert_cn]"
-}
-
-validate_san() {
-  local cert_file="$1"
-  local san_list
-  san_list=$(openssl x509 -in "$cert_file" -noout -text | awk '/Subject Alternative Name:/{getline; print}' | sed 's/DNS://g' | tr -d ' ')
-
-  if [[ "$san_list" != *"*.$DOMAIN_NAME"* ]] || [[ "$san_list" != *"$DOMAIN_NAME"* ]]; then
-    log_error "Missing expected SAN entries. Found: [$san_list]"
-    notify_admin "Expected SANs (*.$DOMAIN_NAME, $DOMAIN_NAME) not found in certificate. Found: [$san_list]" "SSL Certificate SAN Mismatch"
-    return 1
-  fi
-  log "SAN entries verified: [$san_list]"
-}
-
-# FETCH SECRET
-SECRET=$($AWS_CMD secretsmanager get-secret-value \
-  --secret-id "$SECRET_NAME" \
-  --region "$REGION" \
-  --query SecretString \
-  --output text 2>>"$ERR_FILE")
-
-if [ $? -ne 0 ] || [[ -z "$SECRET" ]]; then
-  log_error "Failed to retrieve secret from AWS."
-  notify_admin "Failed to retrieve SSL secret from AWS Secrets Manager (region: $REGION)." "Cert Sync Error"
+if [[ "$PLATFORM" == "unknown" ]]; then
+  log_error "Unknown cloud platform. Cannot proceed."
+  notify_admin "Unknown cloud platform detected on $HOSTNAME_FQDN. SSL certificate update was unfinished and stopped." \
+               "Unknown Platform - SSL Sync Halted"
   exit 1
+fi
+
+log "[INFO] Detected platform: $PLATFORM"
+
+if [[ "$PLATFORM" == "aws" ]]; then
+  REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | jq -r '.region')
+  REGION=${AWS_REGION:-${REGION:-us-east-1}}
+  REQUIRED_IAM_ROLE="${REQUIRED_IAM_ROLE:-IAM_Role_Name}"
+
+  IAM_ROLE_ARN=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/iam/info | jq -r .InstanceProfileArn || echo "")
+  IAM_ROLE_NAME=$(basename "$IAM_ROLE_ARN")
+
+  if [[ "$REQUIRED_IAM_ROLE" != "IAM_Role_Name" ]]; then
+    if [[ -z "$IAM_ROLE_NAME" ]]; then
+      log_error "No IAM role found or metadata API is unavailable."
+      notify_admin "IAM role check failed. No IAM role found on $HOSTNAME_FQDN." "IAM Role Missing"
+      exit 1
+    elif [[ "$IAM_ROLE_NAME" != "$REQUIRED_IAM_ROLE" ]]; then
+      log_error "IAM role mismatch. Expected: $REQUIRED_IAM_ROLE, Got: $IAM_ROLE_NAME"
+      notify_admin "IAM role mismatch. Expected: $REQUIRED_IAM_ROLE, Got: $IAM_ROLE_NAME" "IAM Role Mismatch"
+      exit 1
+    fi
+    log "IAM role verified: $IAM_ROLE_NAME"
+  else
+    log "[INFO] IAM role validation skipped (default value used)"
+  fi
+else
+  log "[INFO] Skipping IAM role check (non-AWS)"
 fi
 
 declare -A FILE_MAP=(
@@ -150,15 +137,75 @@ declare -A FILE_MAP=(
   ["fullchain"]="ssl-bundle.crt"
 )
 
-for key in "${!FILE_MAP[@]}"; do
-  echo "$SECRET" | $JQ_CMD -r ".${key}" | base64 -d > "$TMP_DIR/${FILE_MAP[$key]}" 2>/dev/null
-  if [ $? -ne 0 ]; then
-    log_error "Failed to decode $key."
-    notify_admin "Failed to decode $key from secret." "Cert Sync Error"
-    rm -rf "$TMP_DIR"
+if [[ "$PLATFORM" == "aws" ]]; then
+  log "[INFO] Fetching secrets from AWS..."
+  SECRET=$($AWS_CMD secretsmanager get-secret-value \
+    --secret-id "$SECRET_NAME" \
+    --region "$REGION" \
+    --query SecretString \
+    --output text 2>>"$ERR_FILE")
+
+  if [[ -z "$SECRET" ]]; then
+    log_error "AWS Secrets Manager fetch failed."
+    notify_admin "Could not retrieve secret from AWS." "AWS Secret Fetch Error"
     exit 1
   fi
-done
+
+  for key in "${!FILE_MAP[@]}"; do
+    echo "$SECRET" | $JQ_CMD -r ".${key}" | base64 -d > "$TMP_DIR/${FILE_MAP[$key]}" 2>/dev/null || {
+      log_error "Failed to decode AWS secret for key: $key"
+      notify_admin "AWS secret decoding failed for key: $key" "AWS Secret Decode Error"
+      rm -rf "$TMP_DIR"
+      exit 1
+    }
+  done
+
+elif [[ "$PLATFORM" == "azure" ]]; then
+  log "[INFO] Fetching secrets from Azure Key Vault: $AZURE_KEY_VAULT_NAME"
+  for key in "${!FILE_MAP[@]}"; do
+    secret=$($AZ_CMD keyvault secret show \
+      --vault-name "$AZURE_KEY_VAULT_NAME" \
+      --name "$key" \
+      --query value -o tsv 2>>"$ERR_FILE" || echo "")
+
+    if [[ -z "$secret" ]]; then
+      log_error "Missing or empty Azure secret [$key]"
+      notify_admin "Azure secret [$key] missing or empty in vault: $AZURE_KEY_VAULT_NAME" "Azure Secret Error"
+      rm -rf "$TMP_DIR"
+      exit 1
+    fi
+
+    echo "$secret" | base64 -d > "$TMP_DIR/${FILE_MAP[$key]}" 2>/dev/null || {
+      log_error "Azure secret base64 decode failed for key: $key"
+      notify_admin "Azure secret decoding failed for key: $key" "Azure Secret Decode Error"
+      rm -rf "$TMP_DIR"
+      exit 1
+    }
+  done
+fi
+
+validate_cn() {
+  local cert_file="$1"
+  local expected_cn="*.${DOMAIN_NAME}"
+  local cn=$(openssl x509 -noout -subject -in "$cert_file" | sed -n 's/^.*CN *= *\([^,\/]*\).*$/\1/p')
+  [[ "$cn" != "$expected_cn" ]] && {
+    log_error "CN mismatch. Expected: $expected_cn, Got: $cn"
+    notify_admin "Certificate CN mismatch: $cn" "SSL CN Mismatch"
+    return 1
+  }
+  log "CN verified: $cn"
+}
+
+validate_san() {
+  local cert_file="$1"
+  local san=$(openssl x509 -in "$cert_file" -noout -text | awk '/Subject Alternative Name:/{getline; print}' | sed 's/DNS://g' | tr -d ' ')
+  [[ "$san" != *"*.$DOMAIN_NAME"* || "$san" != *"$DOMAIN_NAME"* ]] && {
+    log_error "Missing SAN entries in cert: $san"
+    notify_admin "SAN mismatch: expected *.$DOMAIN_NAME and $DOMAIN_NAME" "SSL SAN Mismatch"
+    return 1
+  }
+  log "SAN verified: $san"
+}
 
 cert_file="$TMP_DIR/${FILE_MAP["cert"]}"
 validate_cn "$cert_file" || exit 1
@@ -169,65 +216,28 @@ EXPIRY_EPOCH=$(date -d "$EXPIRY_DATE" +%s)
 NOW_EPOCH=$(date +%s)
 DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
 
-FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -in "$cert_file" | cut -d= -f2)
-ISSUER=$(openssl x509 -noout -issuer -in "$cert_file" | sed 's/^issuer= //')
-
-log "Certificate fingerprint (SHA-256): $FINGERPRINT"
-log "Certificate issuer: $ISSUER"
-log "Certificate expiry: $EXPIRY_DATE ($DAYS_LEFT days left)"
-
-if [[ $DAYS_LEFT -lt 0 ]]; then
-  log_error "Certificate already expired on $EXPIRY_DATE"
-  notify_admin "Certificate already expired on $EXPIRY_DATE" "SSL Certificate Expired"
+log "Cert expires on $EXPIRY_DATE ($DAYS_LEFT days left)"
+[[ $DAYS_LEFT -lt 0 ]] && {
+  log_error "Certificate already expired"
+  notify_admin "SSL certificate expired on $EXPIRY_DATE" "SSL Expired"
   rm -rf "$TMP_DIR"
   exit 1
-elif [[ $DAYS_LEFT -le 15 ]]; then
-  log "[WARNING] Certificate is expiring soon ($DAYS_LEFT days left)."
-  notify_admin "The SSL certificate is valid but will expire in $DAYS_LEFT days." "SSL Certificate Expiration Warning"
-fi
-
-missing_all=true
-for key in "${!FILE_MAP[@]}"; do
-  if [[ -f "$CERT_DIR/${FILE_MAP[$key]}" ]]; then
-    missing_all=false
-    break
-  fi
-done
-
-if $missing_all; then
-  TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
-  log "[WARNING] No existing certificate files found in $CERT_DIR."
-  log "[INFO] Installing new certificate files, but nginx will NOT be reloaded automatically."
-
-  for key in "${!FILE_MAP[@]}"; do
-    src="$TMP_DIR/${FILE_MAP[$key]}"
-    dst="$CERT_DIR/${FILE_MAP[$key]}"
-    cp "$src" "$dst"
-    chmod 640 "$dst"
-    chown root:adm "$dst"
-  done
-
-  notify_admin "New certificate files installed at $CERT_DIR on $HOSTNAME_FQDN.\n\nNo existing certs were detected, so nginx was NOT reloaded. Please verify configuration and reload manually if appropriate." \
-               "SSL Certificate Installed (Manual Reload Required)"
-
-  rm -rf "$TMP_DIR"
-  exit 0
-fi
+}
+[[ $DAYS_LEFT -le 15 ]] && {
+  log "[WARNING] Certificate expiring in $DAYS_LEFT days"
+  notify_admin "SSL certificate expiring soon: $DAYS_LEFT days left" "SSL Expiry Warning"
+}
 
 cert_changed=false
 for key in cert key; do
   src="$TMP_DIR/${FILE_MAP[$key]}"
   dst="$CERT_DIR/${FILE_MAP[$key]}"
-  if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
-    cert_changed=true
-    break
-  fi
+  [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst" && cert_changed=true
 done
 
 if $cert_changed; then
   TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
-  log "Installing new certificate. Backing up old files to $CERT_DIR."
-
+  log "Installing new cert and backing up old files"
   for key in "${!FILE_MAP[@]}"; do
     src="$TMP_DIR/${FILE_MAP[$key]}"
     dst="$CERT_DIR/${FILE_MAP[$key]}"
@@ -237,22 +247,18 @@ if $cert_changed; then
     chown root:adm "$dst"
   done
 
-  log "Running nginx config test..."
   if nginx -t; then
-    systemctl reload nginx
-    sleep 3
-    if systemctl is-active --quiet nginx; then
-      log "Nginx successfully reloaded with new certificate."
-    else
-      log_error "Nginx reload failed. Please check nginx status."
-      notify_admin "Nginx reload failed after cert install." "Nginx Reload Error"
-    fi
+    systemctl reload nginx && sleep 3
+    systemctl is-active --quiet nginx && log "Nginx reloaded successfully" || {
+      log_error "Nginx failed after reload"
+      notify_admin "Nginx reload failed after cert update" "Nginx Reload Failed"
+    }
   else
-    log_error "Nginx config test failed. Skipping reload."
-    notify_admin "Nginx config test failed. Cert installed but not reloaded." "Nginx Test Error"
+    log_error "Nginx config test failed"
+    notify_admin "Nginx config test failed. Cert installed but not applied." "Nginx Config Test Failed"
   fi
 else
-  log "Certificate and key unchanged. No reload necessary."
+  log "No changes detected in certificate. Skipping reload."
 fi
 
 rm -rf "$TMP_DIR"
