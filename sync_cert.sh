@@ -186,6 +186,13 @@ if [[ "$PLATFORM" == "aws" ]]; then
 
 elif [[ "$PLATFORM" == "azure" ]]; then
   log "[INFO] Fetching secrets from Azure Key Vault: $AZURE_KEY_VAULT_NAME"
+  
+  az login --identity >/dev/null 2>&1 || {
+    log_error "Azure CLI login with managed identity failed."
+    notify_admin "Azure CLI login failed on $HOSTNAME_FQDN" "Azure Login Failed"
+    exit 1
+  }
+  
   for key in "${!FILE_MAP[@]}"; do
     secret=$($AZ_CMD keyvault secret show \
       --vault-name "$AZURE_KEY_VAULT_NAME" \
