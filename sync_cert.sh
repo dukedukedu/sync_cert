@@ -25,14 +25,38 @@ CONFIG_FILE="/etc/sync_cert.conf"
 
 # Detect platform
 detect_platform() {
-  if curl -s --connect-timeout 1 http://169.254.169.254/latest/meta-data/ >/dev/null; then
-    echo "aws"
-  elif curl -s -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -o /dev/null; then
-    echo "azure"
-  else
-    echo "unknown"
+  # Try AWS IMDSv2
+  if TOKEN=$(curl -s --fail --connect-timeout 1 -X PUT \
+      "http://169.254.169.254/latest/api/token" \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60"); then
+
+    if curl -s --fail --connect-timeout 1 \
+        -H "X-aws-ec2-metadata-token: $TOKEN" \
+        http://169.254.169.254/latest/meta-data/ >/dev/null; then
+      echo "aws"
+      return
+    fi
   fi
+
+  # Fallback to AWS IMDSv1
+  if curl -s --fail --connect-timeout 1 \
+       http://169.254.169.254/latest/meta-data/ >/dev/null; then
+    echo "aws"
+    return
+  fi
+
+  # Try Azure
+  if curl -s --fail -H "Metadata:true" --connect-timeout 1 \
+       "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+       -o /dev/null; then
+    echo "azure"
+    return
+  fi
+
+  # Unknown
+  echo "unknown"
 }
+
 PLATFORM=$(detect_platform)
 
 # Defaults
